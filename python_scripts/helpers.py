@@ -29,6 +29,39 @@ def fltr(bm, v=False, e=False, f=False):
 	types = tuple(types)
 	return list(filter(lambda x: isinstance(x, types), bm))
 
+def fltr_valid(bm):
+	""" Removes geometry from list that is no longer part of the mesh """
+	return list(filter(lambda x: x.is_valid, bm))
+
+def fltr_plane(bm, co, no, v=False, e=False, f=False, *, threshold=-EPSILON, coplanar=False):
+	""" Filter list or bmesh for geometry that is on the positive side (outer) of a plane
+		:param co: location of plane
+		:param no: normal of plane
+		:param threshold: if negative, indicates we will accept values that are `threshold` on wrong side of plane;
+			positive, it does the opposite; for `coplanar` option, it should be negative, giving a range about the plane to accept
+		:param coplanar: vertices that are EPSILON distance from planar surface
+	"""
+	if isinstance(bm, bmesh.types.BMesh):
+		bm = fltr(bm, True, e, f)
+	no = normed_vector(no)
+	verts = set()
+	other = []
+	for x in bm:
+		if isinstance(x, bmesh.types.BMEdge):
+			if e: other.append(x)
+			continue
+		if isinstance(x, bmesh.types.BMFace):
+			if f: other.append(x)
+			continue
+		dir = no.dot(x.co-co)
+		if dir > threshold and (not coplanar or dir < -threshold):
+			verts.add(x)
+	geo = list(verts)
+	for o in other:
+		if all(v in verts for v in o.verts):
+			geo.append(o)
+	return geo
+
 def connecting_geometry(verts, v=False, e=False, f=False):
 	""" Get geometry that is connected to these verts. This is like
 		region extend, but applied infinitely
@@ -160,3 +193,15 @@ def remove_doubles_faces_indiv(bm, distance=EPSILON):
 					vj += 1
 	if len(weld):
 		bmesh.ops.weld_verts(bm, targetmap=weld)
+
+def global_bound_box(obj):
+	""" Get bounding box min/max in global coordinates """
+	mn = Vector.Fill(3, float("inf"))
+	mx = Vector.Fill(3, float("-inf"))
+	for v in obj.bound_box:
+		for i in range(3):
+			if v[i] < mn[i]:
+				mn[i] = v[i]
+			if v[i] > mx[i]:
+				mx[i] = v[i]
+	return mn, mx

@@ -160,11 +160,12 @@ Things I've tried:
 		
 		
 """
+import helpers as H
 import bpy, bmesh, math
 from collections import defaultdict
 from mathutils import Vector, Matrix
 
-
+EPSILON = H.EPSILON
 
 def skewed_square(bm, rad, angle, offset=None):
 	""" generates a skewed square w/ bottom-left corner at offset, returning coordinates of upper-right corner """
@@ -175,50 +176,6 @@ def skewed_square(bm, rad, angle, offset=None):
 		transform = Matrix.Translation(offset) @ transform
 	bmesh.ops.create_grid(bm, x_segments=1, y_segments=1, size=rad, matrix=transform)
 	return Vector((1, sy+1, 0))*2*rad
-
-def fltr_plane(bm, co, no, v=False, e=False, f=False, *, threshold=-EPSILON, coplanar=False, debug=False):
-	""" Filter list or bmesh for geometry that is on the positive side (outer) of a plane
-		:param co: location of plane
-		:param no: normal of plane
-		:param threshold: if negative, indicates we will accept values that are `threshold` on wrong side of plane;
-			positive, it does the opposite; for `coplanar` option, it should be negative, giving a range about the plane to accept
-		:param coplanar: vertices that are EPSILON distance from planar surface
-	"""
-	if isinstance(bm, bmesh.types.BMesh):
-		bm = geom(bm, True, e, f)
-	no = normed_vector(no)
-	verts = set()
-	other = []
-	for x in bm:
-		if isinstance(x, bmesh.types.BMEdge):
-			if e: other.append(x)
-			continue
-		if isinstance(x, bmesh.types.BMFace):
-			if f: other.append(x)
-			continue
-		dir = no.dot(x.co-co)
-		# if debug:
-		# 	print(dir, x.co, no)
-		if dir > threshold and (not coplanar or dir < -threshold):
-			verts.add(x)
-	geo = list(verts)
-	for o in other:
-		if all(v in verts for v in o.verts):
-			geo.append(o)
-	return geo
-
-def fltr_subtract_faces(bm, other):
-	""" Remove faces in "other" from bm """
-	other = set(fltr(other,f=True))
-	out = []
-	for x in bm:
-		if x not in other:
-			out.append(x)
-	return out
-
-def fltr_valid(bm):
-	""" Removes geometry from list that is no longer part of the mesh """
-	return list(filter(lambda x: x.is_valid, bm))
 
 def fold_edge_cutoff_angle(depth, radius1, radius2=None):
 	""" Find optimal angle to allow geometry at a folded edge at least (2*radius)^2 surface
@@ -249,14 +206,12 @@ def fold_edge_clip(bm, geo, edge_coordinate, edge_tangent, surface_normal, radiu
 			around the surface
 		:param surface_normal: normal, point to the outside of the surface (we clip against inside)
 	"""
-	edge_tangent = normed_vector(edge_tangent)
-	no = normed_vector(surface_normal)
+	edge_tangent = H.normed_vector(edge_tangent)
+	no = H.normed_vector(surface_normal)
 	co = Vector(edge_coordinate) + radius*no.cross(edge_tangent)
 	rads = fold_edge_cutoff_angle(depth, radius)
-	print(edge_tangent, co, no, rads)
 	no.rotate(Matrix.Rotation(rads-math.pi/2, 4, edge_tangent))
-	print(no)
-	clip_plane(bm, co, no, delete=2, geo=geo, make_faces=True)
+	H.clip_plane(bm, co, no, delete=2, geo=geo, make_faces=True)
 	
 def fold_edge_shift(w, d, p):
 	""" Similar to fold_edge_cutoff_angle, but parameterized as a shift, and the shift
@@ -289,7 +244,7 @@ def border_angle(b, d, angle):
 	t = (-b*x + 2*d*s + math.sqrt(radical))/(d*x)
 	return math.atan(t)
 
-def create_checkerboard(cellsize, width, height, depth, width_cols):
+def create_checkerboard(cellsize, width, height, depth, width_cols, gap=5e-3):
 	""" Creates a checkerboard, with columns skewed at various angles
 		:param cellsize: width of individual squares
 		:param width: width of checkerboard
@@ -297,6 +252,8 @@ def create_checkerboard(cellsize, width, height, depth, width_cols):
 		:param depth: depth to extrude
 		:param width_cols: width used to calculate skewing columns; beyond this width,
 			we cycle backwards through the angles
+		:param gap: if square tips align perfectly, boolean ops will give non-manifold results;
+			so this adds a small offset so that it will be manifold
 	"""
 	# TODO: zigzag disabled for now; folding assumes skew angle is always positive
 	zigzag = False
@@ -304,7 +261,7 @@ def create_checkerboard(cellsize, width, height, depth, width_cols):
 	bm = bmesh.new()
 	
 	rad = .5*cellsize
-	goffset = 2*cellsize
+	goffset = 2*cellsize+gap
 	angles = list(range(0,15*4+1,15))
 	# angles = [0]
 	# how many cols to give each angle? limit one, so for large widths the larger angles may not get used
@@ -355,7 +312,7 @@ def create_checkerboard(cellsize, width, height, depth, width_cols):
 				if cols_done: break
 				# next offset
 				offset += nxt_corner
-				offset.y = offset.y % goffset
+				offset.y = (offset.y % goffset) + .5*gap
 				if zigzag:
 					angle = -angle
 			if cols_done: break
@@ -365,15 +322,15 @@ def create_checkerboard(cellsize, width, height, depth, width_cols):
 		angle_reverse = True
 
 	# trim edges
-	clip_square(bm, width, height)
+	H.clip_square(bm, width, height)
 	# discard floating edges
 	for v in bm.verts:
 		if not v.link_faces:
 			bm.verts.remove(v)
 	
 	# extrude
-	ret = bmesh.ops.extrude_face_region(bm, geom=geom(bm,True,True,True), use_keep_orig=True)
-	bmesh.ops.translate(bm, vec=(0,0,-depth), verts=fltr(ret["geom"],True))
+	ret = bmesh.ops.extrude_face_region(bm, geom=H.fltr(bm,True,True,True), use_keep_orig=True)
+	bmesh.ops.translate(bm, vec=(0,0,-depth), verts=H.fltr(ret["geom"],True))
 	del ret
 	# extrude has weird face normals for some reason
 	bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
@@ -404,9 +361,9 @@ def fold_checkerboard(bm, cut, cellsize, depth, angle=45, test=False, *, fltr_co
 
 	# cut where we want to fold
 	co = Vector((0,0,cut))
-	ret = clip_plane(bm, co, (0,0,1))
+	ret = H.clip_plane(bm, co, (0,0,1))
 	back_cut_edge = list(filter(lambda g: isinstance(g, bmesh.types.BMVert) and g.co.y > EPSILON, ret["geom_cut"]))
-	cut_edges = fltr(ret["geom_cut"], e=True)
+	cut_edges = H.fltr(ret["geom_cut"], e=True)
 	del ret
 	
 	# we want to enforce that after folding, checkerboard squares are attached to the rest
@@ -416,7 +373,7 @@ def fold_checkerboard(bm, cut, cellsize, depth, angle=45, test=False, *, fltr_co
 	if fltr_co is None:
 		faces = bm.faces
 	else:
-		faces = connecting_geometry(fltr_plane(bm, fltr_co, fltr_no, v=True, threshold=EPSILON), f=True)
+		faces = H.connecting_geometry(H.fltr_plane(bm, fltr_co, fltr_no, v=True, threshold=EPSILON), f=True)
 	# if test:
 	# 	bmesh.ops.delete(bm, geom=faces, context="FACES")
 	# 	return
@@ -535,8 +492,7 @@ def fold_checkerboard(bm, cut, cellsize, depth, angle=45, test=False, *, fltr_co
 
 	# rip at cut, which is needed for later boolean ops for cutting "borders" out
 	edges = bmesh.ops.split_edges(bm, edges=cut_edges)["edges"]
-	fill_edges_with_faces(bm, edges)
-
+	H.fill_edges_with_faces(bm, edges)
 
 def dissolve_ngon(bm):
 	""" Dissolves vertices of an ngon that are not on a corner """
@@ -555,7 +511,7 @@ def merge_coplanar_faces(bm):
 	"""
 	# first remove doubles within individual faces;
 	# if you don't do this, finding 3 shared vertices criteria won't work
-	remove_doubles_faces_indiv(bm)
+	H.remove_doubles_faces_indiv(bm)
 
 	# find doubles is not a symmetric map
 	dbls = bmesh.ops.find_doubles(bm, verts=bm.verts, dist=1e-4)["targetmap"]
@@ -591,6 +547,17 @@ def merge_coplanar_faces(bm):
 			avg[a].append(b)
 		weld[b] = a
 
+	def closest_vertex(a, lst):
+		""" Find closest point in lst to point a """
+		best = None
+		best_dist = float("inf")
+		for i,b in enumerate(lst):
+			dist = (a.co-b.co).length
+			if dist < best_dist:
+				best = i
+				best_dist = dist
+		return best, best_dist
+
 	for fa in bm.faces:
 		if fa in matched:
 			continue
@@ -609,33 +576,34 @@ def merge_coplanar_faces(bm):
 			if len(dbls) > 2:
 				la = len(fa.verts)
 				lb = len(fb.verts)
-				# relaxed mode doesn't need one-to-one mapping, just merges closest vertices
-				# relaxed = la != lb
-				if la != lb:
-					print("Cannot merge since unequal number of vertices", la, lb)
-					continue
+				# if la != lb:
+				# 	print("bad")
+				# 	continue
+				infer = max(la,lb)-len(dbls)
 				for a,b in dbls:
 					mark_vertex(a,b,False)
-				infer = la-len(dbls)
 				if infer > 0:
 					av, bv = zip(*dbls)
 					anv = list(filter(lambda v: v not in av, fa.verts))
 					bnv = list(filter(lambda v: v not in bv, fb.verts))
-					# greedy, match by closest distance
-					for ai in range(0,len(anv)-1):
-						a = anv[ai]
-						best = None
-						best_dist = float("inf")
-						for bi in range(0,len(bnv)):
-							b = bnv[bi]
-							dist = (a.co-b.co).length
-							if dist < best_dist:
-								best = bi
-								best_dist
-						mark_vertex(a,bnv[best],True)
+					# if unequal number of vertices, we can't merge the faces by merging vertices, we'd
+					# need to create extra vertices on one face or delete from another; will use the delete
+					# strategy here since it is simpler, merging extra vertices with a neighbor
+					if la != lb:
+						print("Warning! unequal number of vertices when merging faces:", la, lb)
+					# must keep all vertices of smaller face
+					if la > lb:
+						bnv,anv = anv,bnv
+					# greedy, match by closest distance; should work fine for "normal" geometry
+					for a in anv:
+						best, best_dist = closest_vertex(a, bnv)
+						mark_vertex(a, bnv[best], True)
 						del bnv[best]
-					# leftover
-					mark_vertex(anv[0],bnv[0],True)
+					# leftovers can get merged a second time; again, we'll just greedily match here
+					av = (fb if la > lb else fa).verts[:]
+					for b in bnv:
+						best, best_dist = closest_vertex(b, av)
+						mark_vertex(b, av[best], True)
 				matched.add(fb)
 	
 	# perform merge
@@ -657,46 +625,23 @@ def delete_interior_faces(bm):
 			interior.append(f)
 	bmesh.ops.delete(bm, geom=interior, context="FACES_ONLY")
 
-def uncut_faces(bm):
-	""" Repairs mesh after a cut; it combines adjacent faces that have equal normals """
-	edges = list(bm.edges)
-	dissolve = []
-	for e in edges:
-		angle = e.calc_face_angle(fallback=None)
-		if angle is None or abs(angle)*180/math.pi < 1:
-			dissolve.append(e)
-	bmesh.ops.dissolve_edges
-
-	# faces = list(bm.faces)
-	# for fa in bm.faces:
-	# 	if not fa.is_valid: continue
-	# 	fa.normal_update()
-	# 	na = fa.normal
-	# 	if na.length < EPSILON: continue
-	# 	while True:
-	# 		merge = None
-	# 		for e in fa.edges:
-	# 			for fb in e.link_faces:
-	# 				if fb == fa: continue
-	# 				fb.normal_update()
-	# 				nb = fb.normal
-	# 				angle = abs(na.angle(nb))*180/math.pi if nb.length > EPSILON else 0
-	# 				if angle < 1 or abs(180-angle) < 1:
-	# 					print(angle)
-	# 					merge = e
-	# 					break
-	# 			if merge is not None:
-	# 				break
-	# 		if merge is None:
-	# 			break
-	# 		faces = bmesh.ops.dissolve(bm, geom=geom)["faces"]
-	# 		fa = faces[0]
+def remove_internal_geometry(bm, planes, threshold=-EPSILON):
+	""" remove geometry that is completely inside and would create an internal hole in the model """
+	verts = set()
+	for co,no in planes:
+		verts.update(H.fltr_plane(bm, Vector(co), H.normed_vector(no), v=True, threshold=threshold))
+	verts = H.connecting_geometry(list(verts), True)
+	internal = []
+	for v in bm.verts:
+		if v not in verts:
+			internal.append(v)
+	bmesh.ops.delete(bm, geom=internal)
 
 def angled_checkerboard(coll, cellsize, shift=0, mirror=False):
 	""" Builds checkerboard on 5 different face angles """
 	# we will draw pattern at zero degree and 45 degree
 	width_true = 4 # set by support_weight script
-	outset = .01 # add a small outset to width so boolean op will be stable
+	outset = .025 # add a small outset to width so boolean op will be stable
 	border = .1 # radius, actual border will be 2x this
 	depth = min(.4+outset, cellsize*1.107651)
 
@@ -707,6 +652,10 @@ def angled_checkerboard(coll, cellsize, shift=0, mirror=False):
 	corner_width = width-main_width
 	corner_skew = corner_width*0.7071067811865476 # corner_width * cos(45)
 	corner_height = corner_width*1.220774588761456 # corner_width / cos(35)
+	# three separate heights, since the top/bottom can be extended to fill full object
+	h1 = main_width + 1.69 + 1.2 - .5
+	h2 = main_width # do not changeg
+	h3 = main_width + 1.25
 	
 	print("depth:", depth)
 	print("Angled board dims:", main_width, main_width-2*border, corner_width, corner_skew)
@@ -717,89 +666,96 @@ def angled_checkerboard(coll, cellsize, shift=0, mirror=False):
 	# b35 = border_angle(border, depth, 35)
 
 	# Back side ----------------------
-	side0 = create_checkerboard(cellsize, width-border*1.7071067811865475, main_width*3, depth, main_width-2*border)
-	bmesh.ops.rotate(side0, verts=geom(side0,True), matrix=Matrix.Rotation(90*math.pi/180, 4, "X"))
+	side0 = create_checkerboard(cellsize, width-border*1.7071067811865475, h1+h2+h3, depth, main_width-2*border)
+	bmesh.ops.rotate(side0, verts=H.fltr(side0,True), matrix=Matrix.Rotation(90*math.pi/180, 4, "X"))
 	n1 = Matrix.Rotation((.5*(180-45)-90)*math.pi/180,3,"X") @ Vector((0,0,1))
-	fold_checkerboard(side0, main_width*2, cellsize, depth)
-	fold_checkerboard(side0, main_width, cellsize, depth, test=True, fltr_co=Vector((0,0,2*main_width)), fltr_no=-n1)
+	fold_checkerboard(side0, h1+h2, cellsize, depth)
+	fold_checkerboard(side0, h1, cellsize, depth, test=True, fltr_co=Vector((0,0,h1+h2)), fltr_no=-n1)
 
-	c1 = Vector((main_width-2*border,0,main_width))
+	c1 = Vector((main_width-2*border,0,h1))
 	n2 = Matrix.Rotation(-45*math.pi/180,3,"X") @ n1
-	c2 = Vector((main_width-2*border,corner_width,main_width+corner_width))
+	c2 = Vector((main_width-2*border,corner_width,h1+corner_width))
 	c3 = c2+Vector((0,1.1*border,0))
 	# bottom
 	bn = Matrix.Rotation(b45,3,"Z") @ Vector((1,0,0))
-	bottom = connecting_geometry(fltr_plane(side0, c1, -n1, v=True, threshold=EPSILON, debug=True), True, True, True)
-	clip_plane(side0, c1, bn, geo=bottom, delete=True, make_faces=True)
+	bottom = H.connecting_geometry(H.fltr_plane(side0, c1, -n1, v=True, threshold=EPSILON), True, True, True)
+	H.clip_plane(side0, c1, bn, geo=bottom, delete=True, make_faces=True)
 	# angled side
-	mn = Matrix.Rotation(b35,3,normed_vector((0,1,1))) @ Vector((1,0,0))
-	middle = connecting_geometry(
-		fltr_plane(
-			fltr_plane(side0, c1, n1, v=True, threshold=EPSILON),
+	mn = Matrix.Rotation(b35,3,H.normed_vector((0,1,1))) @ Vector((1,0,0))
+	middle = H.connecting_geometry(
+		H.fltr_plane(
+			H.fltr_plane(side0, c1, n1, v=True, threshold=EPSILON),
 			c2, -n2, v=True, threshold=EPSILON
 		), True, True, True
 	)
-	clip_plane(side0, c1, mn, geo=middle, delete=True, make_faces=True)
+	H.clip_plane(side0, c1, mn, geo=middle, delete=True, make_faces=True)
 	#top
-	top = connecting_geometry(fltr_plane(side0, c2, n2, v=True, threshold=EPSILON), True, True, True)
+	top = H.connecting_geometry(H.fltr_plane(side0, c2, n2, v=True, threshold=EPSILON), True, True, True)
 	tn1 = Matrix.Rotation(b35,3,"Y") @ Vector((1,0,0))
-	tn2 = Matrix.Rotation(b55,3,normed_vector((1,1,0))) @ normed_vector((1,-1,0))
-	clip_plane(side0, c2, tn1, geo=top, rip=True, make_faces=True)
-	clip_plane(side0, c3, tn2, geo=top, rip=True, make_faces=True)
-	cutout = connecting_geometry(
-		fltr_plane(
-			fltr_plane(top, c2, tn1, v=True, threshold=EPSILON),
+	tn2 = Matrix.Rotation(b55,3,H.normed_vector((1,1,0))) @ H.normed_vector((1,-1,0))
+	H.clip_plane(side0, c2, tn1, geo=top, rip=True, make_faces=True)
+	H.clip_plane(side0, c3, tn2, geo=top, rip=True, make_faces=True)
+	cutout = H.connecting_geometry(
+		H.fltr_plane(
+			H.fltr_plane(top, c2, tn1, v=True, threshold=EPSILON),
 			c3, tn2, v=True, threshold=EPSILON
 		),
 		True, True, True
 	)
 	bmesh.ops.delete(side0, geom=cutout)
 
-	bmesh.ops.translate(side0, vec=(border,-outset_x,0), verts=geom(side0, True))
+	remove_internal_geometry(side0, [
+		((0,0,0), (0,-1,0)),
+		((0,0,h1), Matrix.Rotation(-45*math.pi/180,3,"X") @ Vector((0,-1,0))),
+		((0,0,h1+corner_width), Vector((0,0,1)))
+	])
+
+	bmesh.ops.translate(side0, vec=(border,-outset_x,0), verts=H.fltr(side0, True))
 
 	# Angled triangle side ------------------
-	side45 = create_checkerboard(cellsize, main_width+corner_skew-2*border, main_width+corner_height-border, depth, main_width-2*border)
-	bmesh.ops.rotate(side45, verts=geom(side45,True), matrix=Matrix.Rotation(90*math.pi/180, 4, "X"))
-	fold_checkerboard(side45, main_width, cellsize, depth, 35)
+	side45 = create_checkerboard(cellsize, main_width+corner_skew-2*border, h1+corner_height-border, depth, main_width-2*border)
+	bmesh.ops.rotate(side45, verts=H.fltr(side45,True), matrix=Matrix.Rotation(90*math.pi/180, 4, "X"))
+	fold_checkerboard(side45, h1, cellsize, depth, 35)
 
 	n1 = Matrix.Rotation((.5*(180-35)-90)*math.pi/180,3,"X") @ Vector((0,0,1))
-	c1 = Vector((0,0,main_width))
-	c2 = (Matrix.Rotation(-35*math.pi/180,3,"X") @ Vector((0,0,corner_height-border))) + Vector((main_width+corner_skew-border,0,main_width))
+	c1 = Vector((0,0,h1))
+	c2 = (Matrix.Rotation(-35*math.pi/180,3,"X") @ Vector((0,0,corner_height-border))) + Vector((main_width+corner_skew-border,0,h1))
 	# bottom
 	bn = Matrix.Rotation(-b45,3,"Z") @ Vector((-1,0,0))
-	bottom = connecting_geometry(fltr_plane(side45, c1, -n1, v=True, threshold=EPSILON), True, True, True)
-	clip_plane(side45, c1, bn, geo=bottom, delete=True, make_faces=True) # left
-	clip_plane(side45, (main_width-2*border,0,0), (1,0,0), geo=fltr_valid(bottom), delete=True, make_faces=True) # right
+	bottom = H.connecting_geometry(H.fltr_plane(side45, c1, -n1, v=True, threshold=EPSILON), True, True, True)
+	H.clip_plane(side45, c1, bn, geo=bottom, delete=True, make_faces=True) # left
+	H.clip_plane(side45, (main_width-2*border,0,0), (1,0,0), geo=H.fltr_valid(bottom), delete=True, make_faces=True) # right
 	# top
 	lside_norm = Matrix.Rotation(-35*math.pi/180,3,"X") @ Matrix.Rotation(30*math.pi/180,3,"Y") @ Matrix.Rotation(-b35,3,"Z") @ Vector((-1,0,0))
 	rside_norm = Matrix.Rotation(-35*math.pi/180,3,"X") @ Matrix.Rotation(30*math.pi/180,3,"Y") @ Vector((1,0,0))
 	top_norm = Matrix.Rotation(-35*math.pi/180 - b55,3,"X") @ Vector((0,0,1))
 	def get_top():
-		return connecting_geometry(fltr_plane(side45, c1, n1, v=True, threshold=EPSILON), True, True, True)
-	clip_plane(side45, c1, lside_norm, geo=get_top(), delete=True, make_faces=True) # left
-	clip_plane(side45, c2, top_norm, geo=get_top(), delete=True, make_faces=True) # top
-	clip_plane(side45, (main_width-2*border, 0, main_width), rside_norm, geo=get_top(), delete=True, make_faces=True) # right
+		return H.connecting_geometry(H.fltr_plane(side45, c1, n1, v=True, threshold=EPSILON), True, True, True)
+	H.clip_plane(side45, c1, lside_norm, geo=get_top(), delete=True, make_faces=True) # left
+	H.clip_plane(side45, c2, top_norm, geo=get_top(), delete=True, make_faces=True) # top
+	H.clip_plane(side45, (main_width-2*border, 0, h1), rside_norm, geo=get_top(), delete=True, make_faces=True) # right
 
-	bmesh.ops.transform(side45, verts=geom(side45, True), matrix=(
+	remove_internal_geometry(side45, [
+		((0,0,0), (0,-1,0)),
+		((0,0,h1), Matrix.Rotation(-35*math.pi/180,3,"X") @ Vector((0,-1,0)))
+	])
+
+	bmesh.ops.transform(side45, verts=H.fltr(side45, True), matrix=(
 		Matrix.Translation((main_width,-outset_x,0)) @ Matrix.Rotation(45*math.pi/180, 4, "Z") @ Matrix.Translation((border,0,0))
 	))
-
-	# testing
-	#clip_plane(side0, (0,corner_width+1,0), (0,-1,0), delete=True, make_faces=True)
-
 
 	def quick_dissolve(g):
 		bmesh.ops.dissolve_limit(g,
 			angle_limit=10*math.pi/180,
 			use_dissolve_boundaries=True,
-			verts=geom(g,v=True),
-			edges=geom(g,e=True)
+			verts=H.fltr(g,v=True),
+			edges=H.fltr(g,e=True)
 		)
 	for g in [side0,side45]:
 		quick_dissolve(g)
 		merge_coplanar_faces(g)
 		delete_interior_faces(g)
-		quick_dissolve(g)		
+		quick_dissolve(g)	
 
 	name = f"checkerboard_{cellsize}"
 	mesh = bpy.data.meshes.new(name)
@@ -811,8 +767,8 @@ def angled_checkerboard(coll, cellsize, shift=0, mirror=False):
 			mat = Matrix.Translation((width_true*(shift+1),0,0)) @ Matrix.Scale(-1,4,(1,0,0))
 		else:
 			mat = Matrix.Translation((width_true*shift,0,0))
-		bmesh.ops.transform(side0, matrix=mat, verts=geom(side0, True))
-	bmesh.ops.recalc_face_normals(side0, faces=geom(side0, f=True))
+		bmesh.ops.transform(side0, matrix=mat, verts=H.fltr(side0, True))
+	bmesh.ops.recalc_face_normals(side0, faces=H.fltr(side0, f=True))
 	side0.to_mesh(mesh)
 	side0.free()
 
@@ -827,3 +783,14 @@ for i, width in enumerate([.8,.6,.5,.4,.35,.3,.25,.2]):
 	# for i, width in enumerate([.35]):
 	obj = angled_checkerboard(coll, width, shift=i, mirror=not (i & 0x1))
 	
+"""
+coll = bpy.data.collections.new('checkerboard_flat')
+bpy.context.scene.collection.children.link(coll)
+for i, width in enumerate([.8,.6,.5,.4,.35,.3,.25,.2]):
+	obj = angled_checkerboard(coll, width, shift=i, mirror=not (i & 0x1))
+
+
+for i in range(3):
+	for j in range(3):
+		create_checkerboard()
+"""
